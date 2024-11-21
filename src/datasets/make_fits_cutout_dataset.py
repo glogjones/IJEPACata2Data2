@@ -7,7 +7,7 @@
 
 import os
 import numpy as np
-import matplotlib.pyplot as plt  # Added for displaying images
+import matplotlib.pyplot as plt
 from logging import getLogger
 import torch
 from torch.utils.data import DataLoader, Dataset
@@ -133,8 +133,6 @@ class FitsCutoutDataset(Dataset):
         cutout, metadata = self.cata_data[idx]
         if self.transform:
             cutout = self.transform(cutout)
-        # Convert cutout to a single channel for grayscale display
-        cutout = cutout.mean(axis=0, keepdims=True) if isinstance(cutout, np.ndarray) else cutout
         return cutout
 
 
