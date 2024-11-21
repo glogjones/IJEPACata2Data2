@@ -1,57 +1,108 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the license found in the
-# LICENSE file in the root directory of this source tree.
-#
-
+# Import necessary libraries
 import os
+import pandas as pd
 import numpy as np
-from logging import getLogger
+from astropy.io import fits
+from astropy.wcs import WCS
+from astropy.coordinates import SkyCoord
+from cata2data import CataData
+import matplotlib.pyplot as plt
 import torch
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
-from cata2data import CataData
+from PIL import Image
+from logging import getLogger
 
 # Initialize logger and seed
 _GLOBAL_SEED = 0
+np.random.seed(_GLOBAL_SEED)
+torch.manual_seed(_GLOBAL_SEED)
 logger = getLogger()
 
-# Function to create a dataset and DataLoader for `.fits` file cutouts
+# File paths
+image_path = '/content/drive/MyDrive/im_18k4as.deeper.DI.int.restored.fits'
+catalogue_path = '/content/drive/MyDrive/ijepa_logs/catalogue.txt'
+
+# Step 1: Open the FITS file and determine the RA/DEC range
+with fits.open(image_path) as hdul:
+    wcs = WCS(hdul[0].header, naxis=2)
+    image_shape = hdul[0].data.shape[-2:]  # Get the spatial dimensions
+    print("Image dimensions (height, width):", image_shape)
+
+    bottom_left = SkyCoord.from_pixel(0, 0, wcs=wcs)
+    top_right = SkyCoord.from_pixel(image_shape[1] - 1, image_shape[0] - 1, wcs=wcs)
+    ra_min, dec_min = bottom_left.ra.deg, bottom_left.dec.deg
+    ra_max, dec_max = top_right.ra.deg, top_right.dec.deg
+
+print(f"RA range: {ra_min} to {ra_max}")
+print(f"DEC range: {dec_min} to {dec_max}")
+
+# Step 2: Generate Random RA/DEC and Create a Catalogue
+num_cutouts = 5
+ra_values = np.random.uniform(ra_min, ra_max, num_cutouts)
+dec_values = np.random.uniform(dec_min, dec_max, num_cutouts)
+df = pd.DataFrame({"RA_host": ra_values, "DEC_host": dec_values, "COSMOS": np.arange(1, num_cutouts + 1)})
+
+# Save catalogue to file
+with open(catalogue_path, 'w') as f:
+    f.write("# RA_host DEC_host COSMOS\n")
+    df.to_csv(f, sep=' ', index=False, header=False)
+
+print("Catalogue saved to:", catalogue_path)
+
+# Step 3: Dataset Class for FITS Cutouts
+class FitsCutoutDataset(Dataset):
+    def __init__(self, catalogue_path, image_path, cutout_size=224, transform=None, output_folder="./cutouts"):
+        self.cata_data = CataData(
+            catalogue_paths=[catalogue_path],
+            image_paths=[image_path],
+            cutout_shape=cutout_size,
+            field_names=['COSMOS'],
+            catalogue_kwargs={'format': 'commented_header', 'delimiter': ' '}
+        )
+        self.transform = transform
+        self.saved_cutouts = 0
+        self.output_folder = output_folder
+        os.makedirs(self.output_folder, exist_ok=True)
+
+    def __len__(self):
+        return len(self.cata_data)
+
+    def __getitem__(self, idx):
+        cutout, metadata = self.cata_data[idx]
+        if self.transform:
+            cutout = self.transform(cutout)
+
+        # Save and display the first few cutouts
+        if self.saved_cutouts < 5:
+            cutout_image = Image.fromarray(cutout, mode='F')
+            output_path = os.path.join(self.output_folder, f"cutout_{self.saved_cutouts}.png")
+            cutout_image.save(output_path)
+            print(f"Saved grayscale cutout to {output_path}")
+            plt.imshow(cutout, cmap='gray')
+            plt.title(f"Cutout {self.saved_cutouts}")
+            plt.show()
+            self.saved_cutouts += 1
+        
+        return cutout
+
+# Step 4: Transformation Pipeline
+def create_transform():
+    return transforms.Compose([
+        transforms.ToPILImage(),
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485], std=[0.229])
+    ])
+
+# Step 5: DataLoader for Cutouts
 def make_fits_cutout_dataset(
     transform,
-    batch_size,
-    collator=None,
+    batch_size=4,
     pin_mem=True,
-    num_workers=8,
-    world_size=1,
-    rank=0,
-    cutout_size=224,
-    shuffle=True,
-    drop_last=True,
-    image_path=None,
-    catalogue_path=None
+    num_workers=2,
+    cutout_size=224
 ):
-    """
-    Creates a DataLoader for `.fits` file cutouts using CataData.
-
-    Args:
-        transform (callable): Transformations to apply to the cutouts.
-        batch_size (int): Batch size for the DataLoader.
-        collator (callable, optional): Custom collator function for batching.
-        pin_mem (bool): Whether to pin memory for faster transfer to GPU.
-        num_workers (int): Number of workers for DataLoader.
-        world_size (int): Number of distributed processes.
-        rank (int): Rank of the current process.
-        cutout_size (int): Size of each cutout.
-        shuffle (bool): Whether to shuffle the dataset.
-        drop_last (bool): Whether to drop the last incomplete batch.
-        image_path (str): Path to the FITS image file.
-        catalogue_path (str): Path to the catalogue file.
-
-    Returns:
-        tuple: Dataset, DataLoader, and DistributedSampler.
-    """
     dataset = FitsCutoutDataset(
         catalogue_path=catalogue_path,
         image_path=image_path,
@@ -60,83 +111,26 @@ def make_fits_cutout_dataset(
     )
     logger.info('FITS cutout dataset created')
 
-    dist_sampler = torch.utils.data.distributed.DistributedSampler(
-        dataset=dataset,
-        num_replicas=world_size,
-        rank=rank,
-        shuffle=shuffle
-    )
     data_loader = DataLoader(
         dataset,
-        collate_fn=collator,
-        sampler=dist_sampler,
         batch_size=batch_size,
-        drop_last=drop_last,
         pin_memory=pin_mem,
-        num_workers=num_workers,
-        persistent_workers=False
+        num_workers=num_workers
     )
     logger.info('FITS cutout data loader created')
+    return dataset, data_loader
 
-    return dataset, data_loader, dist_sampler
+# Step 6: Main Execution
+if __name__ == "__main__":
+    # Create transformation pipeline
+    transform = create_transform()
 
+    # Create dataset and dataloader
+    dataset, dataloader = make_fits_cutout_dataset(transform=transform)
 
-class FitsCutoutDataset(Dataset):
-    """
-    A Dataset class for `.fits` file cutouts using CataData.
-    """
-    def __init__(self, catalogue_path, image_path, cutout_size=224, transform=None):
-        """
-        Initialize the FitsCutoutDataset.
+    # Loop through the DataLoader
+    print("Displaying first few cutouts:")
+    for batch_idx, cutouts in enumerate(dataloader):
+        if batch_idx == 1:  # Display only the first batch
+            break
 
-        Args:
-            catalogue_path (str): Path to the catalogue file.
-            image_path (str): Path to the FITS image file.
-            cutout_size (int): Size of each cutout.
-            transform (callable, optional): Transformations to apply to the cutouts.
-        """
-        # Initialize the CataData object
-        self.cata_data = CataData(
-            catalogue_paths=[catalogue_path],
-            image_paths=[image_path],
-            cutout_shape=cutout_size,
-            field_names=['COSMOS'],  # Single field name for compatibility
-            catalogue_kwargs={'format': 'commented_header', 'delimiter': ' '}
-        )
-        self.transform = transform
-
-    def __len__(self):
-        """Return the total number of samples in the dataset."""
-        return len(self.cata_data)
-
-    def __getitem__(self, idx):
-        """
-        Retrieve a single sample from the dataset.
-
-        Args:
-            idx (int): Index of the sample to retrieve.
-
-        Returns:
-            torch.Tensor: The transformed cutout image.
-        """
-        cutout, metadata = self.cata_data[idx]
-        if self.transform:
-            cutout = self.transform(cutout)
-        return cutout
-
-
-# Function to create a transformation pipeline
-def create_transform():
-    """
-    Create a transformation pipeline for the cutout images.
-
-    Returns:
-        callable: Composed transformations.
-    """
-    transform = transforms.Compose([
-        transforms.ToPILImage(),
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485], std=[0.229])  # Adjust mean and std as needed
-    ])
-    return transform
