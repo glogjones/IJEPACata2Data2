@@ -92,6 +92,9 @@ def main(args, resume_preempt=False):
     use_horizontal_flip = args['data']['use_horizontal_flip']
     use_color_distortion = args['data']['use_color_distortion']
     color_jitter = args['data']['color_jitter_strength']
+    cutout_size = args['data']['cutout_size']
+    image_path = args['data']['image_path']
+    catalogue_path = args['data']['catalogue_path']
     # --
     batch_size = args['data']['batch_size']
     pin_mem = args['data']['pin_mem']
