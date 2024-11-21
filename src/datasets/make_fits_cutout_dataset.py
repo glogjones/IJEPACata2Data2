@@ -98,10 +98,17 @@ def create_transform():
 # Step 5: DataLoader for Cutouts
 def make_fits_cutout_dataset(
     transform,
-    batch_size=4,
+    batch_size,
+    collator=None,  # Added collator argument
     pin_mem=True,
-    num_workers=2,
-    cutout_size=224
+    num_workers=8,
+    world_size=1,
+    rank=0,
+    cutout_size=224,
+    shuffle=True,
+    drop_last=True,
+    image_path=None,
+    catalogue_path=None
 ):
     dataset = FitsCutoutDataset(
         catalogue_path=catalogue_path,
