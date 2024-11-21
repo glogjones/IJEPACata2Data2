@@ -49,6 +49,9 @@ from src.helper import (
     init_opt)
 from src.transforms import make_transforms
 
+# Import the new data loader
+from src.datasets.make_fits_cutout_dataset import make_fits_cutout_dataset
+
 # --
 log_timings = True
 log_freq = 10
